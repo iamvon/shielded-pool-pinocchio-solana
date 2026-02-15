@@ -26,12 +26,20 @@ pub fn process_deposit(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let amount = u64::from_le_bytes(data[0..8].try_into().map_err(|_| {
         ProgramError::InvalidInstructionData
     })?);
-    let _commitment: [u8; 32] = data[8..40]
+    let commitment: [u8; 32] = data[8..40]
         .try_into()
         .map_err(|_| ProgramError::InvalidInstructionData)?;
     let new_root: [u8; 32] = data[40..72]
         .try_into()
         .map_err(|_| ProgramError::InvalidInstructionData)?;
+
+    // C-03 mitigation: Prevent zero-amount deposits that allow root injection without economic cost.
+    // An attacker can inject an arbitrary Merkle root via a zero-lamport deposit, then withdraw
+    // the entire vault balance using a ZK proof crafted against their injected root.
+    if amount == 0 {
+        log("Deposit amount must be greater than zero");
+        return Err(ProgramError::InvalidInstructionData);
+    }
 
     log("Processing Deposit");
 
@@ -68,6 +76,16 @@ pub fn process_deposit(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
         return Err(ProgramError::UninitializedAccount);
     }
 
+    // TODO(C-01/C-02): The root MUST be computed on-chain from the commitment, not accepted from
+    // instruction data. The current design allows any caller to inject an arbitrary Merkle root.
+    // Fix requires:
+    //   1. Store commitments (leaves) in an on-chain Merkle tree account
+    //   2. Insert `commitment` into the tree on deposit
+    //   3. Compute and store the new root from the tree — never from client data
+    //   4. Remove `new_root` from instruction data entirely
+    // Until then, the pool's root-of-trust is fundamentally broken: any deposit can overwrite the
+    // Merkle root, enabling a vault drain via crafted ZK proofs against attacker-controlled roots.
+    let _ = commitment; // Used after on-chain Merkle tree is implemented (see TODO above)
     state.add_root(new_root);
 
     log("Deposit successful, root updated");
